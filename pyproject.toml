@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "loga-corpus"
+version = "0.1.0"
+description = "Translate Simple English Wikipedia to Loga using a local LLM"
+requires-python = ">=3.11"
+dependencies = [
+    "mlx-lm>=0.22",
+    "click>=8.0",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+dev = ["ruff"]
+
+[project.scripts]
+translate = "translator.translate:cli"

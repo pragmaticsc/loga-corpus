@@ -17,13 +17,13 @@ pip install -e .
 python -m translator.translate \
     --input ../conlang-experiment/data/raw/english/simplewiki-articles.jsonl \
     --output data/loga-articles.jsonl \
-    --model mlx-community/gemma-3-27b-it-4bit \
+    --model mlx-community/gemma-4-31b-it-8bit \
     --max-articles 100    # omit for full corpus
 ```
 
 ## Key Design Decisions
 
-- **Local LLM** (not API) to eliminate cost. Gemma 27B 4-bit fits in ~17GB on M4 Max 64GB.
+- **Local LLM** (not API) to eliminate cost. Gemma 4 31B 8-bit fits in ~32GB on M4 Max 64GB.
 - **Resumable**: output is append-only JSONL; already-translated article IDs are skipped on restart.
 - **Loga grammar preamble** is injected as system prompt for every translation call — identical to the spec in `~/Dev/loga/conlang-spec.md`.
 - **Translation confound** is the main reviewer risk. Mitigations: back-translation validation, Esperanto baseline from conlang-experiment (natural corpus, no translation step).

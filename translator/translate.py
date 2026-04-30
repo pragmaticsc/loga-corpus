@@ -7,21 +7,26 @@ Reads Simple English Wikipedia articles from a JSONL file, translates each
 article to Loga, and writes output as JSONL. Resumable — skips articles
 already present in the output file.
 
+A persistent dictionary (data/dictionary.json) grows during translation:
+- Before each article, the current dictionary is injected into the prompt
+- After each article, new codes found in the output are extracted and added
+- This ensures the same entity/concept always gets the same Loga code
+
 Usage:
     python -m translator.translate \
         --input ../conlang-experiment/data/raw/english/simplewiki-articles.jsonl \
         --output data/loga-articles.jsonl \
-        --model mlx-community/gemma-3-27b-it-4bit
+        --model mlx-community/gemma-4-31b-it-8bit
 
 Requirements:
     pip install -e .
-    (downloads model weights on first run — ~17GB for 4-bit 27B)
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -118,18 +123,6 @@ Core verbs (all uppercase first char):
 
 Numbers: use digit literals directly. Compound: 42, 100, 1945.
 
-Proper nouns: abbreviate to 2 printable ASCII chars, capitalize first.
-  "England" → En!   "Paris" → Pa!   "Albert Einstein" → Ab! Es!
-  "United States" → US!   "World War" → Ww!
-
-SAMPLE SENTENCES:
-  ka! da" Se: .     = The person sees the thing.
-  mi! bo& Go; .     = I went toward the city.
-  ku! li" Be: .     = Water is life.
-  mi! ` ka! da" Se; " Kn: .  = I know that the person saw the thing.
-  \\ ka! bo& Go< .   = Some people will go to the city.
-  mi! da" _Se: .    = I do not see the thing.
-
 TRANSLATION RULES:
 1. Translate MEANING, not word-for-word. Choose the closest Loga root.
 2. For new concepts: use a compound (root{root) or abbreviate to 2 chars.
@@ -139,6 +132,151 @@ TRANSLATION RULES:
 6. Every noun must have exactly one case suffix. Every verb must have exactly one tense marker.
 7. Sentence-final period "." is a standalone space-delimited token after the verb: e.g. "Go; ." not "Go;."
 """
+
+
+# ---------------------------------------------------------------------------
+# Persistent dictionary
+# ---------------------------------------------------------------------------
+
+# Codes reserved by core vocabulary — proper nouns must not reuse these
+RESERVED_CODES = {
+    # Core verb roots
+    "Be", "Go", "Se", "Sa", "Ma", "Gi", "Ta", "Ea", "Sl", "Th",
+    "Kn", "Wa", "Si", "Ha", "Us", "Li", "Di", "Ca", "Co", "Le",
+    "Fi", "St", "En", "Ch", "Ru", "Fo", "Wo", "Fe", "Wi", "Re",
+    "Bu", "Br", "Sp", "Tr",
+}
+
+
+class Dictionary:
+    """Persistent English→Loga code mapping. Grows during translation."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.entries: dict[str, str] = {}  # english_term → loga_code
+        self.codes_used: set[str] = set(RESERVED_CODES)
+        self._load()
+
+    def _load(self):
+        if self.path.exists():
+            with open(self.path) as f:
+                data = json.load(f)
+            self.entries = data.get("entries", {})
+            self.codes_used = set(RESERVED_CODES)
+            self.codes_used.update(self.entries.values())
+            log.info("Dictionary loaded: %d entries", len(self.entries))
+
+    def save(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.path, "w") as f:
+            json.dump({"entries": self.entries}, f, indent=2, ensure_ascii=False)
+
+    def get(self, term: str) -> str | None:
+        return self.entries.get(term)
+
+    def add(self, term: str, code: str):
+        if term not in self.entries:
+            self.entries[term] = code
+            self.codes_used.add(code)
+
+    def format_for_prompt(self, max_entries: int = 500) -> str:
+        """Format dictionary entries for injection into the prompt."""
+        if not self.entries:
+            return ""
+        # Sort by term for consistency
+        items = sorted(self.entries.items())[:max_entries]
+        lines = ["DICTIONARY (use these exact codes — do NOT invent alternatives):"]
+        for term, code in items:
+            lines.append(f"  {term}={code}")
+        return "\n".join(lines)
+
+    def extract_new_codes(self, english_text: str, loga_text: str):
+        """Extract proper noun codes from output and cross-reference with input."""
+        # Find all uppercase 2-char codes used as proper nouns in the Loga output
+        # Pattern: uppercase letter + alphanumeric + case suffix (from !-/ range)
+        proper_noun_pattern = re.compile(r'\b([A-Z][a-zA-Z0-9])[!"#$%&\'()*+,\-./]')
+        loga_codes = set(proper_noun_pattern.findall(loga_text))
+
+        # Remove codes that are known verbs (could appear with case suffixes as proper nouns)
+        new_codes = loga_codes - self.codes_used
+
+        if not new_codes:
+            return
+
+        # Try to match new codes to capitalized words in the English text
+        english_words = set(re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', english_text))
+
+        for code in new_codes:
+            # Find the English word that best matches this code
+            best_match = None
+            for word in english_words:
+                # Check if the code could be an abbreviation of this word
+                if word[0].upper() == code[0]:
+                    if best_match is None or len(word) < len(best_match):
+                        best_match = word
+            if best_match:
+                self.add(best_match, code)
+            else:
+                # Store with code as both key and value so we track it's used
+                self.add(f"_unknown_{code}", code)
+            self.codes_used.add(code)
+
+
+# Seed dictionary with high-frequency Wikipedia proper nouns
+SEED_DICTIONARY = {
+    # Months
+    "January": "Ja", "February": "Fb", "March": "Mc", "April": "Ap",
+    "May": "My", "June": "Jn", "July": "Jy", "August": "Au",
+    "September": "Sm", "October": "Oc", "November": "Nv", "December": "Dc",
+    # Days
+    "Monday": "Md", "Tuesday": "Td", "Wednesday": "Wd", "Thursday": "Th",
+    "Friday": "Fd", "Saturday": "Sd", "Sunday": "Sy",
+    # Continents
+    "Africa": "Af", "Asia": "As", "Europe": "Ep", "North America": "Na",
+    "South America": "Sa2", "Antarctica": "An", "Australia": "Al", "Oceania": "Oa",
+    # Major countries
+    "United States": "Us", "United Kingdom": "Uk", "France": "Fc", "Germany": "Gm",
+    "China": "Cn", "Japan": "Jp", "India": "Id", "Russia": "Ru2",
+    "Brazil": "Bz", "Canada": "Cd", "Italy": "It", "Spain": "Sn2",
+    "Mexico": "Mx", "England": "Eg", "Scotland": "Sc",
+    "Ireland": "Ir", "Netherlands": "Nl", "Poland": "Pl", "Sweden": "Sv",
+    "Norway": "Nw", "Greece": "Gc", "Egypt": "Ey", "Turkey": "Tk",
+    "Israel": "Is", "Iran": "Ia", "South Korea": "Sk", "North Korea": "Nk",
+    "Argentina": "Ag", "South Africa": "Za", "New Zealand": "Nz",
+    "Portugal": "Pt", "Austria": "At", "Switzerland": "Sw", "Belgium": "Bg",
+    "Denmark": "Dk", "Finland": "Fn", "Hungary": "Hu", "Romania": "Rm",
+    "Ukraine": "Ua", "Pakistan": "Pk", "Indonesia": "In2",
+    "Philippines": "Ph", "Vietnam": "Vn", "Thailand": "Tl",
+    "Colombia": "Cb", "Chile": "Cl", "Peru": "Pu", "Cuba": "Cu",
+    # Major cities
+    "London": "Ld", "Paris": "Ps", "New York": "Ny", "Tokyo": "Ty",
+    "Beijing": "Bj", "Moscow": "Mw", "Berlin": "Bn", "Rome": "Ro2",
+    "Madrid": "Mr", "Washington": "Wn", "Los Angeles": "La2",
+    "Chicago": "Cg", "Sydney": "Sy2", "Mumbai": "Mb",
+    # History
+    "World War": "Ww", "United Nations": "Un", "European Union": "Ue",
+    # Misc
+    "Earth": "Er", "Sun": "Sn", "Moon": "Mn", "God": "Gd",
+    "Bible": "Bb", "Olympic": "Ol", "Wikipedia": "Wp",
+    "Christian": "Cr", "Islam": "Im", "Catholic": "Ct", "Protestant": "Pr",
+    "Latin": "Lt", "Greek": "Gk", "English": "El", "French": "Fh",
+    "German": "Ge2", "Spanish": "Sh", "Chinese": "Ch2", "Japanese": "Jz",
+    "Arabic": "Ab", "Russian": "Rs", "Hindi": "Hd",
+    "Atlantic": "Ao", "Pacific": "Pf", "Indian Ocean": "Io",
+    "Mediterranean": "Mt", "Amazon": "Az", "Nile": "Ni",
+    "Sahara": "Sr", "Himalaya": "Hm", "Alps": "Ap2",
+}
+
+
+def init_dictionary(path: Path) -> Dictionary:
+    """Load or create dictionary, seeding with known proper nouns."""
+    d = Dictionary(path)
+    if not d.entries:
+        for term, code in SEED_DICTIONARY.items():
+            d.add(term, code)
+        d.save()
+        log.info("Dictionary initialized with %d seed entries", len(SEED_DICTIONARY))
+    return d
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +301,9 @@ def get_model(model_name: str):
 # Translation
 # ---------------------------------------------------------------------------
 
-def translate_text(text: str, model_name: str, max_tokens: int = 4096) -> str:
+def translate_text(
+    text: str, model_name: str, dictionary: Dictionary, max_tokens: int = 4096,
+) -> str:
     """Translate English text to Loga using local LLM."""
     from mlx_lm import generate
 
@@ -172,9 +312,15 @@ def translate_text(text: str, model_name: str, max_tokens: int = 4096) -> str:
     chunks = _chunk_text(text, max_chars=3000)
     translated = []
 
+    dict_section = dictionary.format_for_prompt()
+
     for chunk in chunks:
+        system = GRAMMAR_PREAMBLE
+        if dict_section:
+            system = system + "\n\n" + dict_section
+
         messages = [
-            {"role": "system", "content": GRAMMAR_PREAMBLE},
+            {"role": "system", "content": system},
             {"role": "user", "content": f"Translate this English text to Loga:\n\n{chunk}"},
         ]
         prompt = tokenizer.apply_chat_template(
@@ -182,7 +328,7 @@ def translate_text(text: str, model_name: str, max_tokens: int = 4096) -> str:
         )
         response = generate(
             model, tokenizer, prompt=prompt,
-            max_tokens=max_tokens, verbose=False,
+            max_tokens=max_tokens, verbose=True,
         )
         translated.append(response.strip())
 
@@ -238,8 +384,10 @@ def run_pipeline(
     model_name: str,
     max_articles: int,
     max_tokens: int,
+    dict_path: Path,
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    dictionary = init_dictionary(dict_path)
 
     # Load already-translated IDs
     done_ids: set[str] = set()
@@ -279,7 +427,13 @@ def run_pipeline(
     with open(output_path, "a") as out_f:
         for article in tqdm(articles, desc="Translating"):
             try:
-                text_loga = translate_text(article["text"], model_name, max_tokens)
+                text_loga = translate_text(
+                    article["text"], model_name, dictionary, max_tokens,
+                )
+
+                # Extract new codes and grow the dictionary
+                dictionary.extract_new_codes(article["text"], text_loga)
+
                 record = {
                     "id": article["id"],
                     "title": article["title"],
@@ -292,11 +446,14 @@ def run_pipeline(
                 stats.total_input_chars += len(article["text"])
                 stats.total_output_chars += len(text_loga)
 
+                # Save dictionary every 10 articles
                 if stats.translated % 10 == 0:
+                    dictionary.save()
                     remaining = len(articles) - stats.translated - stats.skipped - stats.failed
                     log.info(
-                        "Progress: %d done, %.0f articles/hr, ETA %s",
+                        "Progress: %d done, %.0f articles/hr, ETA %s, dict size %d",
                         stats.translated, stats.rate(), stats.eta(remaining),
+                        len(dictionary.entries),
                     )
 
             except Exception as e:
@@ -304,12 +461,14 @@ def run_pipeline(
                 log.warning("Failed on article %s: %s", article.get("id", "?"), e)
                 continue
 
+    dictionary.save()
     elapsed = time.time() - stats.start_time
     log.info(
         "Done. %d translated, %d failed, %.1f min elapsed, "
-        "%.0f articles/hr, input %d chars → output %d chars (%.1fx compression)",
+        "%.0f articles/hr, dict size %d, "
+        "input %d chars → output %d chars (%.1fx compression)",
         stats.translated, stats.failed, elapsed / 60,
-        stats.rate(),
+        stats.rate(), len(dictionary.entries),
         stats.total_input_chars, stats.total_output_chars,
         stats.total_input_chars / max(stats.total_output_chars, 1),
     )
@@ -325,15 +484,18 @@ def run_pipeline(
 @click.option("--output", "output_path", type=click.Path(path_type=Path),
               default="data/loga-articles.jsonl", show_default=True)
 @click.option("--model", "model_name",
-              default="mlx-community/gemma-3-27b-it-4bit", show_default=True,
+              default="mlx-community/gemma-4-31b-it-8bit", show_default=True,
               help="MLX model to use for translation")
 @click.option("--max-articles", default=0, show_default=True,
               help="Limit number of articles (0 = all)")
 @click.option("--max-tokens", default=4096, show_default=True,
               help="Max tokens per translation chunk")
-def cli(input_path, output_path, model_name, max_articles, max_tokens):
+@click.option("--dictionary", "dict_path", type=click.Path(path_type=Path),
+              default="data/dictionary.json", show_default=True,
+              help="Path to persistent dictionary file")
+def cli(input_path, output_path, model_name, max_articles, max_tokens, dict_path):
     """Translate Simple English Wikipedia articles to Loga using a local LLM."""
-    run_pipeline(input_path, output_path, model_name, max_articles, max_tokens)
+    run_pipeline(input_path, output_path, model_name, max_articles, max_tokens, dict_path)
 
 
 if __name__ == "__main__":

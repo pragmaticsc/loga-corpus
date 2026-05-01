@@ -179,15 +179,27 @@ class Dictionary:
             self.entries[term] = code
             self.codes_used.add(code)
 
-    def format_for_prompt(self, max_entries: int = 500) -> str:
-        """Format dictionary entries for injection into the prompt."""
-        if not self.entries:
+    def relevant_entries(self, english_text: str) -> dict[str, str]:
+        """Return only dictionary entries whose English term appears in the text."""
+        text_lower = english_text.lower()
+        matches = {}
+        for term, code in self.entries.items():
+            if term.startswith("_unknown_"):
+                continue
+            if term.lower() in text_lower:
+                matches[term] = code
+        return matches
+
+    def format_for_prompt(self, english_text: str) -> str:
+        """Format only the relevant dictionary entries for this article."""
+        relevant = self.relevant_entries(english_text)
+        if not relevant:
             return ""
-        # Sort by term for consistency
-        items = sorted(self.entries.items())[:max_entries]
-        lines = ["DICTIONARY (use these exact codes — do NOT invent alternatives):"]
-        for term, code in items:
-            lines.append(f"  {term}={code}")
+        lines = ["PROPER NOUN CODES (use these exact codes for these entities):"]
+        for term, code in sorted(relevant.items()):
+            lines.append(f"  {term} = {code}")
+        lines.append("For any proper noun NOT listed above, invent a unique 2-char code "
+                      "(first char uppercase). Do NOT reuse any code from this list.")
         return "\n".join(lines)
 
     def extract_new_codes(self, english_text: str, loga_text: str):
@@ -227,44 +239,44 @@ SEED_DICTIONARY = {
     # Months
     "January": "Ja", "February": "Fb", "March": "Mc", "April": "Ap",
     "May": "My", "June": "Jn", "July": "Jy", "August": "Au",
-    "September": "Sm", "October": "Oc", "November": "Nv", "December": "Dc",
+    "September": "Sp", "October": "Oc", "November": "Nv", "December": "Dc",
     # Days
-    "Monday": "Md", "Tuesday": "Td", "Wednesday": "Wd", "Thursday": "Th",
-    "Friday": "Fd", "Saturday": "Sd", "Sunday": "Sy",
+    "Monday": "Md", "Tuesday": "Td", "Wednesday": "Wd", "Thursday": "Tr",
+    "Friday": "Fd", "Saturday": "Sd", "Sunday": "Sn",
     # Continents
-    "Africa": "Af", "Asia": "As", "Europe": "Ep", "North America": "Na",
-    "South America": "Sa2", "Antarctica": "An", "Australia": "Al", "Oceania": "Oa",
+    "Africa": "Af", "Asia": "As", "Europe": "Eu", "North America": "NA",
+    "South America": "SA", "Antarctica": "An", "Australia": "AU", "Oceania": "Oa",
     # Major countries
-    "United States": "Us", "United Kingdom": "Uk", "France": "Fc", "Germany": "Gm",
-    "China": "Cn", "Japan": "Jp", "India": "Id", "Russia": "Ru2",
-    "Brazil": "Bz", "Canada": "Cd", "Italy": "It", "Spain": "Sn2",
-    "Mexico": "Mx", "England": "Eg", "Scotland": "Sc",
-    "Ireland": "Ir", "Netherlands": "Nl", "Poland": "Pl", "Sweden": "Sv",
-    "Norway": "Nw", "Greece": "Gc", "Egypt": "Ey", "Turkey": "Tk",
-    "Israel": "Is", "Iran": "Ia", "South Korea": "Sk", "North Korea": "Nk",
-    "Argentina": "Ag", "South Africa": "Za", "New Zealand": "Nz",
-    "Portugal": "Pt", "Austria": "At", "Switzerland": "Sw", "Belgium": "Bg",
-    "Denmark": "Dk", "Finland": "Fn", "Hungary": "Hu", "Romania": "Rm",
-    "Ukraine": "Ua", "Pakistan": "Pk", "Indonesia": "In2",
-    "Philippines": "Ph", "Vietnam": "Vn", "Thailand": "Tl",
-    "Colombia": "Cb", "Chile": "Cl", "Peru": "Pu", "Cuba": "Cu",
+    "United States": "US", "United Kingdom": "UK", "France": "Fr", "Germany": "De",
+    "China": "CN", "Japan": "JP", "India": "IN", "Russia": "RU",
+    "Brazil": "BR", "Canada": "CA", "Italy": "IT", "Spain": "ES",
+    "Mexico": "MX", "England": "Eg", "Scotland": "Sc",
+    "Ireland": "IE", "Netherlands": "NL", "Poland": "PL", "Sweden": "SE",
+    "Norway": "NO", "Greece": "GR", "Egypt": "EG", "Turkey": "TK",
+    "Israel": "IL", "Iran": "IR", "South Korea": "SK", "North Korea": "NK",
+    "Argentina": "AR", "South Africa": "ZA", "New Zealand": "NZ",
+    "Portugal": "PT", "Austria": "AT", "Switzerland": "CH", "Belgium": "BE",
+    "Denmark": "DK", "Finland": "FI", "Hungary": "HU", "Romania": "RO",
+    "Ukraine": "UA", "Pakistan": "PK", "Indonesia": "ID",
+    "Philippines": "PH", "Vietnam": "VN", "Thailand": "TH",
+    "Colombia": "CO", "Chile": "CL", "Peru": "PE", "Cuba": "CU",
     # Major cities
-    "London": "Ld", "Paris": "Ps", "New York": "Ny", "Tokyo": "Ty",
-    "Beijing": "Bj", "Moscow": "Mw", "Berlin": "Bn", "Rome": "Ro2",
-    "Madrid": "Mr", "Washington": "Wn", "Los Angeles": "La2",
-    "Chicago": "Cg", "Sydney": "Sy2", "Mumbai": "Mb",
+    "London": "Ld", "Paris": "Ps", "New York": "NY", "Tokyo": "Ty",
+    "Beijing": "Bj", "Moscow": "Mw", "Berlin": "Bn", "Rome": "Rm",
+    "Madrid": "Ma", "Washington": "DC", "Los Angeles": "LA",
+    "Chicago": "Cg", "Sydney": "Sy", "Mumbai": "Mb",
     # History
-    "World War": "Ww", "United Nations": "Un", "European Union": "Ue",
+    "World War": "WW", "United Nations": "UN", "European Union": "EU",
     # Misc
-    "Earth": "Er", "Sun": "Sn", "Moon": "Mn", "God": "Gd",
-    "Bible": "Bb", "Olympic": "Ol", "Wikipedia": "Wp",
+    "Earth": "Er", "Sun": "So", "Moon": "Mn", "God": "Gd",
+    "Bible": "Bb", "Olympic": "OL", "Wikipedia": "WP",
     "Christian": "Cr", "Islam": "Im", "Catholic": "Ct", "Protestant": "Pr",
-    "Latin": "Lt", "Greek": "Gk", "English": "El", "French": "Fh",
-    "German": "Ge2", "Spanish": "Sh", "Chinese": "Ch2", "Japanese": "Jz",
+    "Latin": "Lt", "Greek": "Gk", "English": "En", "French": "Fh",
+    "German": "Gn", "Spanish": "Sh", "Chinese": "Cz", "Japanese": "Jz",
     "Arabic": "Ab", "Russian": "Rs", "Hindi": "Hd",
-    "Atlantic": "Ao", "Pacific": "Pf", "Indian Ocean": "Io",
-    "Mediterranean": "Mt", "Amazon": "Az", "Nile": "Ni",
-    "Sahara": "Sr", "Himalaya": "Hm", "Alps": "Ap2",
+    "Atlantic": "Ao", "Pacific": "Pf", "Indian Ocean": "IO",
+    "Mediterranean": "Me", "Amazon": "Az", "Nile": "Ni",
+    "Sahara": "Sr", "Himalaya": "Hm", "Alps": "Al",
 }
 
 
@@ -312,9 +324,8 @@ def translate_text(
     chunks = _chunk_text(text, max_chars=3000)
     translated = []
 
-    dict_section = dictionary.format_for_prompt()
-
     for chunk in chunks:
+        dict_section = dictionary.format_for_prompt(chunk)
         system = GRAMMAR_PREAMBLE
         if dict_section:
             system = system + "\n\n" + dict_section

@@ -125,12 +125,15 @@ Numbers: use digit literals directly. Compound: 42, 100, 1945.
 
 TRANSLATION RULES:
 1. Translate MEANING, not word-for-word. Choose the closest Loga root.
-2. For new concepts: use a compound (root{root) or abbreviate to 2 chars.
-3. Keep sentences short. Split long English sentences into multiple Loga sentences.
-4. Preserve paragraph structure (blank lines between paragraphs).
-5. Output ONLY Loga text. NO English. NO explanation. NO commentary.
-6. Every noun must have exactly one case suffix. Every verb must have exactly one tense marker.
-7. Sentence-final period "." is a standalone space-delimited token after the verb: e.g. "Go; ." not "Go;."
+2. ALWAYS use the VOCABULARY entries provided below the grammar rules.
+   These are mandatory — do NOT invent alternatives for listed words.
+3. For concepts NOT in the vocabulary: use a compound (root{root) or the
+   closest existing root. Be consistent.
+4. Keep sentences short. Split long English sentences into multiple Loga sentences.
+5. Preserve paragraph structure (blank lines between paragraphs).
+6. Output ONLY Loga text. NO English. NO explanation. NO commentary.
+7. Every noun must have exactly one case suffix. Every verb must have exactly one tense marker.
+8. Sentence-final period "." is a standalone space-delimited token after the verb: e.g. "Go; ." not "Go;."
 """
 
 
@@ -182,12 +185,21 @@ class Dictionary:
     def relevant_entries(self, english_text: str) -> dict[str, str]:
         """Return only dictionary entries whose English term appears in the text."""
         text_lower = english_text.lower()
+        # Split text into word set for fast membership checks
+        text_words = set(re.findall(r"[a-z]+", text_lower))
         matches = {}
         for term, code in self.entries.items():
             if term.startswith("_unknown_"):
                 continue
-            if term.lower() in text_lower:
-                matches[term] = code
+            term_lower = term.lower()
+            # Multi-word terms: check substring
+            if " " in term:
+                if term_lower in text_lower:
+                    matches[term] = code
+            else:
+                # Single-word: check word set
+                if term_lower in text_words:
+                    matches[term] = code
         return matches
 
     def format_for_prompt(self, english_text: str) -> str:
@@ -195,11 +207,21 @@ class Dictionary:
         relevant = self.relevant_entries(english_text)
         if not relevant:
             return ""
-        lines = ["PROPER NOUN CODES (use these exact codes for these entities):"]
-        for term, code in sorted(relevant.items()):
-            lines.append(f"  {term} = {code}")
-        lines.append("For any proper noun NOT listed above, invent a unique 2-char code "
-                      "(first char uppercase). Do NOT reuse any code from this list.")
+        # Separate by type: proper nouns (uppercase code) vs common words (lowercase code)
+        proper = {t: c for t, c in relevant.items() if c[0].isupper()}
+        common = {t: c for t, c in relevant.items() if c[0].islower()}
+
+        lines = ["VOCABULARY (use these exact Loga codes — mandatory, do not invent alternatives):"]
+        if common:
+            lines.append("")
+            lines.append("  Nouns/Verbs:")
+            for term, code in sorted(common.items()):
+                lines.append(f"    {term} = {code}")
+        if proper:
+            lines.append("")
+            lines.append("  Proper nouns:")
+            for term, code in sorted(proper.items()):
+                lines.append(f"    {term} = {code}")
         return "\n".join(lines)
 
     def extract_new_codes(self, english_text: str, loga_text: str):
